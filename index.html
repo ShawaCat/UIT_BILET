@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Генератор экзаменационных билетов</title>
+<meta name="description" content="Генерация экзаменационных билетов из Word-шаблона прямо в браузере">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+
+<header class="page-header">
+  <div class="wrap">
+    <h1>Генератор экзаменационных билетов</h1>
+    <p class="lead">
+      Загрузите шаблон билета и базу вопросов, укажите данные для шапки и параметры —
+      готовый <code>.docx</code> скачается на компьютер.
+      Всё считается прямо в браузере: файлы никуда не отправляются.
+    </p>
+  </div>
+</header>
+
+<main class="wrap">
+  <ol class="steps">
+
+    <!-- Шаг 1. Файлы -->
+    <li class="card">
+      <h2><span class="num">1</span> Файлы Word</h2>
+
+      <div class="files">
+        <div class="file-slot">
+          <label class="file-label" for="template-input">
+            <span class="file-title">Шаблон билета</span>
+            <span class="file-hint">.docx с таблицей и заполнителями &lt;DISCIP&gt;, &lt;BILET_TASK&gt;…</span>
+          </label>
+          <input type="file" id="template-input" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document">
+          <p class="file-state" id="template-state" data-state="empty">файл не выбран</p>
+        </div>
+
+        <div class="file-slot">
+          <label class="file-label" for="questions-input">
+            <span class="file-title">База вопросов</span>
+            <span class="file-hint">.docx, каждый вопрос — отдельный абзац</span>
+          </label>
+          <input type="file" id="questions-input" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document">
+          <p class="file-state" id="questions-state" data-state="empty">файл не выбран</p>
+        </div>
+      </div>
+
+      <button type="button" class="ghost" id="repo-files">Взять файлы из репозитория</button>
+      <p class="hint" id="repo-hint">
+        Кнопка загружает <code>Макет.docx</code> и <code>Вопросы.docx</code> с этого же сайта —
+        удобно, чтобы попробовать без подготовки файлов.
+      </p>
+    </li>
+
+    <!-- Шаг 2. Данные для шапки -->
+    <li class="card">
+      <h2><span class="num">2</span> Данные для шапки билета</h2>
+      <div id="fields" class="fields">
+        <p class="hint">Поля появляются после выбора шаблона — по заполнителям в нём.</p>
+      </div>
+
+      <details class="ini">
+        <summary>Вставить содержимое config.ini</summary>
+        <textarea id="ini-input" rows="4" spellcheck="false"
+          placeholder="&lt;DISCIP&gt; = ТАУ&#10;&lt;DATE&gt; = 05 ноября 2026&#10;&lt;LECTOR_NAME&gt; = Сидорова Е.Ю."></textarea>
+        <button type="button" class="ghost" id="ini-apply">Заполнить поля из текста</button>
+      </details>
+    </li>
+
+    <!-- Шаг 3. Параметры -->
+    <li class="card">
+      <h2><span class="num">3</span> Параметры</h2>
+      <div class="params">
+        <label class="field">
+          <span class="field-name">Билетов (N)</span>
+          <input type="number" id="count" min="1" max="500" step="1" value="10">
+        </label>
+        <label class="field">
+          <span class="field-name">Вопросов в билете (M)</span>
+          <input type="number" id="per-ticket" min="1" max="100" step="1" value="3">
+        </label>
+        <label class="field">
+          <span class="field-name">Билетов на странице</span>
+          <select id="per-page">
+            <option value="2" selected>до 2 (если не влезают — 1)</option>
+            <option value="1">всегда 1</option>
+          </select>
+        </label>
+        <label class="field">
+          <span class="field-name">Случайность (seed)</span>
+          <input type="number" id="seed" step="1" placeholder="каждый раз новая">
+        </label>
+      </div>
+
+      <label class="checkbox">
+        <input type="checkbox" id="unique" checked>
+        <span>Не повторять наборы вопросов в разных билетах</span>
+      </label>
+      <p class="hint" id="params-hint"></p>
+    </li>
+
+    <!-- Шаг 4. Результат -->
+    <li class="card">
+      <h2><span class="num">4</span> Результат</h2>
+      <button type="button" class="primary" id="generate" disabled>Сгенерировать и скачать .docx</button>
+      <div id="status" class="status" role="status" aria-live="polite"></div>
+      <div id="report" class="report" hidden></div>
+
+      <details id="preview-wrap" hidden>
+        <summary>Предпросмотр билетов</summary>
+        <div id="preview" class="preview"></div>
+      </details>
+    </li>
+
+  </ol>
+</main>
+
+<footer class="page-footer">
+  <div class="wrap">
+    <p>
+      Работает офлайн, без сервера: документ собирается в браузере.
+      Скрипт-версия для командной строки — <code>bilety.py</code> в репозитории.
+    </p>
+  </div>
+</footer>
+
+<script src="assets/jszip.min.js"></script>
+<script src="assets/bilet-engine.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>
