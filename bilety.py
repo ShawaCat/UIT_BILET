@@ -14,7 +14,8 @@
 
 Вопросы в билет выбираются случайно (без повторов внутри билета).
 Билеты верстаются так, чтобы на одной странице помещалось два билета,
-а если два не влезают — один билет на страницу.
+а если два не влезают — один билет на страницу: каждый билет — отдельная
+таблица высотой в половину полосы набора, которую Word не может разорвать.
 
 Все параметры задаются константами в блоке «НАСТРОЙКИ» ниже.
 Запуск:  ``python bilety.py``
@@ -56,10 +57,13 @@ QUESTION_ALIGNMENT = "left"         # выравнивание вопросов:
 QUESTION_SPACE_AFTER_TWIPS = 60     # интервал после вопроса (1 см ≈ 567 twips)
 QUESTION_HANGING_INDENT_TWIPS = 340 # висячий отступ для второй строки вопроса (0 — отключить)
 
+FORCE_TABLE_BORDERS = True          # прописывать рамки таблицы напрямую (если редактор "теряет" их)
+
 # Технические допуски вёрстки (twips; 567 twips = 1 см)
+TICKET_GAP_TWIPS = 300              # просвет между двумя билетами на странице
 PAGE_SLOT_PAD_TWIPS = 140           # запас по высоте на каждую «половину» страницы
 LAST_ROW_SAFETY_TWIPS = 60          # запас при растягивании билета на половину страницы
-HEIGHT_SAFETY_FACTOR = 1.05         # запас при оценке высоты «шапки» билета
+HEIGHT_SAFETY_FACTOR = 1.03         # запас при оценке высоты «шапки» билета
 VERBOSE = True                      # печатать отчёт о работе
 
 #: Заполнители, которые подставляет сама программа (остальные берутся из файла конфигурации)
@@ -264,17 +268,36 @@ PPR_ORDER = [
 ]
 _PPR_INDEX = {name: index for index, name in enumerate(PPR_ORDER)}
 
+#: порядок дочерних элементов w:tblPr по схеме WordprocessingML
+TBLPR_ORDER = [
+    "tblStyle", "tblpPr", "tblOverlap", "bidiVisual", "tblStyleRowBandSize",
+    "tblStyleColBandSize", "tblW", "jc", "tblCellSpacing", "tblInd", "tblBorders",
+    "shd", "tblLayout", "tblCellMar", "tblLook", "tblCaption", "tblDescription",
+    "tblPrChange",
+]
+_TBLPR_INDEX = {name: index for index, name in enumerate(TBLPR_ORDER)}
 
-def _insert_ppr_child(p_pr, element) -> None:
-    """Вставляет элемент в w:pPr, соблюдая порядок, требуемый схемой OOXML."""
+
+def _insert_ordered(parent, element, index_map: Dict[str, int]) -> None:
+    """Вставляет элемент в нужное место, соблюдая порядок из схемы OOXML."""
     tag = element.tag.split("}")[-1]
-    position = _PPR_INDEX.get(tag, len(PPR_ORDER))
-    for child in p_pr:
+    position = index_map.get(tag, len(index_map))
+    for child in parent:
         child_tag = child.tag.split("}")[-1]
-        if _PPR_INDEX.get(child_tag, len(PPR_ORDER)) > position:
+        if index_map.get(child_tag, len(index_map)) > position:
             child.addprevious(element)
             return
-    p_pr.append(element)
+    parent.append(element)
+
+
+def _insert_ppr_child(p_pr, element) -> None:
+    """Вставляет элемент в w:pPr в порядке схемы."""
+    _insert_ordered(p_pr, element, _PPR_INDEX)
+
+
+def _insert_tblpr_child(tbl_pr, element) -> None:
+    """Вставляет элемент в w:tblPr в порядке схемы."""
+    _insert_ordered(tbl_pr, element, _TBLPR_INDEX)
 
 
 def _el(tag: str, **attrs: str):
@@ -540,6 +563,15 @@ def _count_lines(text: str, width_twips: float, font_size_pt: float) -> int:
     return lines
 
 
+def _space_after(paragraph, defaults: StyleDefaults) -> float:
+    """Интервал после абзаца (из pPr, иначе из значений по умолчанию)."""
+    p_pr = paragraph.find(qn("w:pPr"))
+    spacing = p_pr.find(qn("w:spacing")) if p_pr is not None else None
+    if spacing is None:
+        return defaults.space_after
+    return float(spacing.get(qn("w:after")) or 0)
+
+
 def _paragraph_height(paragraph, defaults: StyleDefaults, width_twips: float) -> float:
     """Оценка высоты абзаца в twips (с учётом интервалов и переносов)."""
     p_pr = paragraph.find(qn("w:pPr"))
@@ -617,7 +649,17 @@ def _cell_text_width(cell, column: int, grid_widths: Sequence[int], span: int) -
 
 
 def _cell_content_height(cell, defaults: StyleDefaults, text_width: float) -> float:
-    return sum(_paragraph_height(p, defaults, text_width) for p in cell.findall(qn("w:p")))
+    """Высота абзацев ячейки.
+
+    Word не добавляет интервал «после» последнему абзацу в ячейке таблицы,
+    поэтому он вычитается — иначе оценка «шапки» завышается на один интервал
+    в каждой ячейке.
+    """
+    paragraphs = cell.findall(qn("w:p"))
+    if not paragraphs:
+        return 0.0
+    total = sum(_paragraph_height(p, defaults, text_width) for p in paragraphs)
+    return max(0.0, total - _space_after(paragraphs[-1], defaults))
 
 
 def estimate_rows_height(rows: Sequence, defaults: StyleDefaults, grid_widths: Sequence[int]) -> List[float]:
@@ -753,20 +795,12 @@ def _prepare_ticket_table(template_table, ticket: Ticket, values: Dict[str, str]
     table = copy.deepcopy(template_table)
     _strip_volatile_ids(table)
 
-    # Вложенная таблица выравнивается по левому краю ячейки-контейнера
-    tbl_pr = table.find(qn("w:tblPr"))
-    if tbl_pr is not None:
-        indent = tbl_pr.find(qn("w:tblInd"))
-        if indent is not None:
-            indent.set(qn("w:w"), "0")
-
     question_row = _insert_questions(table, ticket.questions, values)
 
     for paragraph in table.iter(qn("w:p")):
         _replace_placeholders(paragraph, values)
 
-    for row in table.findall(qn("w:tr")):
-        _forbid_row_split(row)
+    _pin_table_geometry(table)
     return table, question_row
 
 
@@ -794,56 +828,99 @@ def _stretch_ticket(question_row, target_height: float, header_height: float) ->
         _set_cell_valign_top(cell)
 
 
-def _container_table(total_width: int, indent: int):
-    """Невидимая таблица-контейнер: одна колонка, одна строка на билет."""
-    table = OxmlElement("w:tbl")
-
-    tbl_pr = OxmlElement("w:tblPr")
-    tbl_pr.append(_el("w:tblW", w=total_width, type="dxa"))
-    tbl_pr.append(_el("w:jc", val="left"))
-    tbl_pr.append(_el("w:tblInd", w=indent, type="dxa"))
-
-    borders = OxmlElement("w:tblBorders")
-    for edge in ("top", "left", "bottom", "right", "insideH", "insideV"):
-        borders.append(_el(f"w:{edge}", val="nil"))
-    tbl_pr.append(borders)
-    tbl_pr.append(_el("w:tblLayout", type="fixed"))
-
-    margins = OxmlElement("w:tblCellMar")
-    for edge in ("top", "left", "bottom", "right"):
-        margins.append(_el(f"w:{edge}", w=0, type="dxa"))
-    tbl_pr.append(margins)
-    table.append(tbl_pr)
-
-    grid = OxmlElement("w:tblGrid")
-    grid.append(_el("w:gridCol", w=total_width))
-    table.append(grid)
-    return table
+def _spacer_paragraph(height_twips: int = 2):
+    """Пустой абзац заданной высоты: просвет между билетами / хвост документа."""
+    paragraph = OxmlElement("w:p")
+    p_pr = OxmlElement("w:pPr")
+    p_pr.append(_el("w:spacing", before=0, after=0, line=height_twips, lineRule="exact"))
+    r_pr = OxmlElement("w:rPr")
+    r_pr.append(_el("w:sz", val=2))
+    r_pr.append(_el("w:szCs", val=2))
+    p_pr.append(r_pr)
+    paragraph.append(p_pr)
+    return paragraph
 
 
-def _container_row(table, slot_height: float, width: int):
-    """Строка контейнера: ровно «половина страницы» и без разрыва."""
-    row = OxmlElement("w:tr")
-    tr_pr = OxmlElement("w:trPr")
-    tr_pr.append(OxmlElement("w:cantSplit"))
-    height = OxmlElement("w:trHeight")
-    height.set(qn("w:val"), str(int(slot_height)))
-    height.set(qn("w:hRule"), "atLeast")
-    tr_pr.append(height)
-    row.append(tr_pr)
+def _pin_table_geometry(table) -> None:
+    """Жёстко фиксирует ширину колонок и рамки таблицы билета.
 
-    cell = OxmlElement("w:tc")
-    tc_pr = OxmlElement("w:tcPr")
-    tc_pr.append(_el("w:tcW", w=width, type="dxa"))
-    cell_margins = OxmlElement("w:tcMar")
-    for edge in ("top", "left", "bottom", "right"):
-        cell_margins.append(_el(f"w:{edge}", w=0, type="dxa"))
-    tc_pr.append(cell_margins)
-    tc_pr.append(_el("w:vAlign", val="top"))
-    cell.append(tc_pr)
-    row.append(cell)
-    table.append(row)
-    return cell
+    В шаблоне у ячеек стоит ``tcW type="auto"`` и нет ``tblLayout``, поэтому
+    редактор вправе пересчитать ширины колонок «по содержимому»: правая колонка
+    сужается (дата переносится на две строки), а у объединённой ячейки может
+    пропасть правая рамка. Здесь ширины берутся из ``tblGrid`` шаблона и
+    прописываются явно, а таблица переводится в режим фиксированной разметки.
+    """
+    tbl_pr = table.find(qn("w:tblPr"))
+    if tbl_pr is None:
+        tbl_pr = OxmlElement("w:tblPr")
+        table.insert(0, tbl_pr)
+
+    grid = _grid_widths(table)
+
+    if grid:
+        width_node = tbl_pr.find(qn("w:tblW"))
+        if width_node is None:
+            _insert_tblpr_child(tbl_pr, _el("w:tblW", w=sum(grid), type="dxa"))
+
+    layout = tbl_pr.find(qn("w:tblLayout"))
+    if layout is None:
+        layout = OxmlElement("w:tblLayout")
+        _insert_tblpr_child(tbl_pr, layout)
+    layout.set(qn("w:type"), "fixed")
+
+    # если рамки в шаблоне не описаны напрямую, прописываем их сами:
+    # так они не зависят от того, применил ли редактор стиль таблицы
+    if FORCE_TABLE_BORDERS and tbl_pr.find(qn("w:tblBorders")) is None:
+        borders = OxmlElement("w:tblBorders")
+        for edge in ("top", "left", "bottom", "right", "insideH", "insideV"):
+            borders.append(_el(f"w:{edge}", val="single", sz=4, space=0, color="auto"))
+        _insert_tblpr_child(tbl_pr, borders)
+
+    for row in table.findall(qn("w:tr")):
+        column = 0
+        for cell in row.findall(qn("w:tc")):
+            span = _cell_gridspan(cell)
+            width = sum(grid[column : column + span]) if grid else 0
+            column += span
+            if not width:
+                continue
+            tc_pr = cell.find(qn("w:tcPr"))
+            if tc_pr is None:
+                tc_pr = OxmlElement("w:tcPr")
+                cell.insert(0, tc_pr)
+            tc_w = tc_pr.find(qn("w:tcW"))
+            if tc_w is None:
+                tc_w = OxmlElement("w:tcW")
+                tc_pr.insert(0, tc_w)
+            tc_w.set(qn("w:w"), str(int(width)))
+            tc_w.set(qn("w:type"), "dxa")
+
+
+def _set_keep_next(paragraph) -> None:
+    """Просит редактор не отрывать абзац от следующего (``keepNext``)."""
+    p_pr = paragraph.find(qn("w:pPr"))
+    if p_pr is None:
+        p_pr = OxmlElement("w:pPr")
+        paragraph.insert(0, p_pr)
+    if p_pr.find(qn("w:keepNext")) is None:
+        _insert_ppr_child(p_pr, OxmlElement("w:keepNext"))
+
+
+def _keep_ticket_together(table) -> None:
+    """Запрещает разрывать билет между страницами.
+
+    ``cantSplit`` не даёт разорвать строку, ``keepNext`` привязывает строку к
+    следующей. Вместе они удерживают весь билет на одной странице: если остаток
+    страницы мал, билет целиком переезжает на следующую — так и получается
+    «один билет на странице», когда два не влезают.
+    """
+    rows = table.findall(qn("w:tr"))
+    for index, row in enumerate(rows):
+        _forbid_row_split(row)
+        if index == len(rows) - 1:
+            continue  # последняя строка (с вопросами) ни к чему не привязана
+        for paragraph in row.iter(qn("w:p")):
+            _set_keep_next(paragraph)
 
 
 # =============================================================================
@@ -876,22 +953,12 @@ def build_document(
         _twips(section.page_height) - _twips(section.top_margin) - _twips(section.bottom_margin)
     )
     per_page = max(1, int(MAX_TICKETS_PER_PAGE))
-    slot_height = usable_height / per_page - PAGE_SLOT_PAD_TWIPS
+    gap = TICKET_GAP_TWIPS if per_page > 1 else 0
+    slot_height = (usable_height - gap * (per_page - 1)) / per_page - PAGE_SLOT_PAD_TWIPS
     if slot_height <= 500:
         raise BiletError("Слишком маленькая страница в шаблоне — билет не помещается.")
 
     grid_widths = _grid_widths(template_table)
-
-    # --- геометрия контейнера: копируем ширину и отступ шаблонной таблицы ---
-    tbl_pr = template_table.find(qn("w:tblPr"))
-    total_width, indent = 9000, 0
-    if tbl_pr is not None:
-        width_node = tbl_pr.find(qn("w:tblW"))
-        if width_node is not None and width_node.get(qn("w:w")):
-            total_width = int(width_node.get(qn("w:w")))
-        indent_node = tbl_pr.find(qn("w:tblInd"))
-        if indent_node is not None and indent_node.get(qn("w:w")):
-            indent = int(indent_node.get(qn("w:w")))
 
     # --- очищаем тело документа, оставляя свойства раздела ---
     body = document.element.body
@@ -900,14 +967,12 @@ def build_document(
         if child is not sect_pr:
             body.remove(child)
 
-    container = _container_table(total_width, indent)
+    elements: List = []
     unknown_placeholders: set = set()
     header_height: Optional[float] = None
     natural_heights: List[float] = []
 
-    for ticket in tickets:
-        cell = _container_row(container, slot_height, total_width)
-
+    for index, ticket in enumerate(tickets):
         # <NUM> у каждого билета свой, остальные значения — из файла конфигурации
         ticket_values = dict(values)
         ticket_values["NUM"] = str(ticket.number)
@@ -927,13 +992,18 @@ def build_document(
             header_rows = rows[:header_index]
             header_height = (
                 sum(estimate_rows_height(header_rows, defaults, grid_widths)) * HEIGHT_SAFETY_FACTOR
-                + 30 * len(header_rows)
+                + 20 * len(header_rows)
             )
 
         natural_heights.append(sum(estimate_rows_height(rows, defaults, grid_widths)))
         _stretch_ticket(question_row, slot_height, header_height)
-        cell.append(table)
-        cell.append(_tiny_paragraph())  # ячейка обязана заканчиваться абзацем
+        _keep_ticket_together(table)
+
+        if index:  # без абзаца между таблицами Word склеил бы их в одну
+            elements.append(_spacer_paragraph(gap))
+        elements.append(table)
+
+    elements.append(_spacer_paragraph())
 
     if unknown_placeholders:
         print(
@@ -942,11 +1012,11 @@ def build_document(
             file=sys.stderr,
         )
 
-    if sect_pr is not None:
-        sect_pr.addprevious(container)
-        sect_pr.addprevious(_tiny_paragraph())
-    else:  # pragma: no cover - раздел есть почти всегда
-        body.append(container)
+    for element in elements:
+        if sect_pr is not None:
+            sect_pr.addprevious(element)
+        else:  # pragma: no cover - раздел есть почти всегда
+            body.append(element)
 
     layout = {
         "usable_height": float(usable_height),
